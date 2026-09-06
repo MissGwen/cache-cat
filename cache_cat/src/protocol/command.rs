@@ -5,9 +5,11 @@ use crate::protocol::bf::bf_card::BfCardCommand;
 use crate::protocol::bf::bf_exits::BfExistsCommand;
 use crate::protocol::bf::bf_info::BfInfoCommand;
 use crate::protocol::bf::bf_insert::BfInsertCommand;
+use crate::protocol::bf::bf_loadchunk::BfLoadChunkCommand;
 use crate::protocol::bf::bf_madd::BfMAddCommand;
 use crate::protocol::bf::bf_mexits::BfMExistsCommand;
 use crate::protocol::bf::bf_reserve::BfReserveCommand;
+use crate::protocol::bf::bf_scandump::BfScanDumpCommand;
 use crate::protocol::bitmap::bitcount::BitCountCommand;
 use crate::protocol::bitmap::bitfield::BitFieldCommand;
 use crate::protocol::bitmap::bitop::BitOpCommand;
@@ -130,7 +132,6 @@ use tokio::select;
 use tokio::sync::watch;
 use tokio_util::codec::Framed;
 use tracing::{error, warn};
-use crate::protocol::bf::bf_scandump::BfScanDumpCommand;
 
 #[async_trait]
 pub trait Command: Send + Sync {
@@ -414,6 +415,7 @@ impl CommandFactory {
         factory.register("BF.INSERT", BfInsertCommand);
         factory.register("BF.CARD", BfCardCommand);
         factory.register("BF.SCANDUMP", BfScanDumpCommand);
+        factory.register("BF.LOADCHUNK", BfLoadChunkCommand);
         factory
     }
 

@@ -131,13 +131,11 @@ impl ComputeCommand for BfAddReq {
                 },
                 Value::Boolean(true),
             ),
-
             /*
              * Bloom 判断 item 已经存在时
              * 没有发生任何 mutation。
              */
             Ok(false) => (MochaOperation::Abort, Value::Boolean(false)),
-
             Err(error) => (MochaOperation::Abort, bloom_insert_error(error).into()),
         }
     }
@@ -145,24 +143,19 @@ impl ComputeCommand for BfAddReq {
     fn init(self) -> (MochaOperation<MyValue>, Value) {
         let mut bloom = match BloomObject::redis_default() {
             Ok(bloom) => bloom,
-
             Err(error) => {
                 return (MochaOperation::Abort, bloom_create_error(error).into());
             }
         };
-
         let added = match bloom.add(&self.item) {
             Ok(added) => added,
-
             Err(error) => {
                 return (MochaOperation::Abort, bloom_insert_error(error).into());
             }
         };
-
         (
             MochaOperation::Insert {
                 value: MyValue::new(ValueObject::Bloom(Arc::new(Mutex::new(bloom)))),
-
                 expire: ExpirePolicy::Persistent,
             },
             Value::Boolean(added),
@@ -174,10 +167,7 @@ impl ComputeCommand for BfAddReq {
 fn bloom_insert_error(error: BloomError) -> ProtocolError {
     match error {
         BloomError::Full => ProtocolError::BloomFilterFull,
-
-        BloomError::OutOfMemory | BloomError::Invalid | BloomError::Overflow => {
-            ProtocolError::BloomInsertFailed
-        }
+        _ => ProtocolError::BloomInsertFailed,
     }
 }
 
@@ -185,9 +175,6 @@ fn bloom_insert_error(error: BloomError) -> ProtocolError {
 fn bloom_create_error(error: BloomError) -> ProtocolError {
     match error {
         BloomError::OutOfMemory => ProtocolError::BloomCreateOutOfMemory,
-
-        BloomError::Full | BloomError::Invalid | BloomError::Overflow => {
-            ProtocolError::BloomCreateFailed
-        }
+        _ => ProtocolError::BloomCreateFailed,
     }
 }

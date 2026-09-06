@@ -48,7 +48,6 @@ impl ReadCommand for BfCardParams {
     fn execute(&self, value: Option<EntrySnapshot<MyValue>>) -> Value {
         match value {
             None => Value::Integer(0),
-
             Some(entry) => match &entry.value.data {
                 ValueObject::Bloom(bloom) => {
                     let bloom = bloom.lock();
@@ -83,7 +82,6 @@ impl Command for BfCardCommand {
             queue.push(self.raft_request(items)?);
             return Ok(Value::SimpleString("QUEUED".to_string()));
         }
-
         let operation = self.read_operation(items)?;
         server.app.read(operation, client.db_number).await
     }

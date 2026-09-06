@@ -114,6 +114,7 @@ pub fn base_request(
         BaseOperation::BfMAdd(param) => my_cache.bf_madd(param, update),
         BaseOperation::BfReserve(param) => my_cache.bf_reserve(param, update),
         BaseOperation::BfInsert(param) => my_cache.bf_insert(param, update),
+        BaseOperation::BfLoadChunk(param) => my_cache.bf_load(param, update),
     }
 }
 

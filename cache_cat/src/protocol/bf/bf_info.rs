@@ -37,23 +37,18 @@ impl BfInfoField {
         if value.eq_ignore_ascii_case(b"CAPACITY") {
             return Ok(Self::Capacity);
         }
-
         if value.eq_ignore_ascii_case(b"SIZE") {
             return Ok(Self::Size);
         }
-
         if value.eq_ignore_ascii_case(b"FILTERS") {
             return Ok(Self::Filters);
         }
-
         if value.eq_ignore_ascii_case(b"ITEMS") {
             return Ok(Self::Items);
         }
-
         if value.eq_ignore_ascii_case(b"EXPANSION") {
             return Ok(Self::Expansion);
         }
-
         Err(ProtocolError::BloomInvalidInformationValue)
     }
 
@@ -83,25 +78,19 @@ pub struct BfInfoParams {
 impl Display for BfInfoParams {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "BF.INFO {}", String::from_utf8_lossy(&self.key))?;
-
         if let Some(field) = self.field {
             write!(
                 f,
                 " {}",
                 match field {
                     BfInfoField::Capacity => "CAPACITY",
-
                     BfInfoField::Size => "SIZE",
-
                     BfInfoField::Filters => "FILTERS",
-
                     BfInfoField::Items => "ITEMS",
-
                     BfInfoField::Expansion => "EXPANSION",
                 }
             )?;
         }
-
         Ok(())
     }
 }
@@ -111,21 +100,17 @@ impl BfInfoParams {
         if items.len() != 2 && items.len() != 3 {
             return Err(ProtocolError::WrongArgCount("BF.INFO"));
         }
-
         let key = items[1]
             .string_bytes_clone()
             .ok_or(ProtocolError::InvalidArgument("key"))?;
-
         let field = if items.len() == 3 {
             let value = items[2]
                 .string_bytes_clone()
                 .ok_or(ProtocolError::BloomInvalidInformationValue)?;
-
             Some(BfInfoField::parse(value.as_ref())?)
         } else {
             None
         };
-
         Ok(Self { key, field })
     }
 }
@@ -143,14 +128,11 @@ impl ReadCommand for BfInfoParams {
             Some(entry) => entry,
             None => return ProtocolError::BloomNotFound.into(),
         };
-
         let bloom = match &entry.value.data {
             ValueObject::Bloom(bloom) => bloom,
             _ => return ProtocolError::WrongType.into(),
         };
-
         let bloom = bloom.lock();
-
         match self.field {
             None => Value::Map(vec![
                 info_entry(BfInfoField::Capacity, &bloom),
@@ -159,7 +141,6 @@ impl ReadCommand for BfInfoParams {
                 info_entry(BfInfoField::Items, &bloom),
                 info_entry(BfInfoField::Expansion, &bloom),
             ]),
-
             Some(field) => Value::MapWithResp2 {
                 entries: vec![info_entry(field, &bloom)],
                 resp2: Resp2MapEncoding::Values,
@@ -178,23 +159,12 @@ fn info_entry(field: BfInfoField, bloom: &BloomObject) -> (Value, Value) {
 fn info_value(field: BfInfoField, bloom: &BloomObject) -> Value {
     match field {
         BfInfoField::Capacity => Value::Integer(u64_to_redis_integer(bloom.info_capacity())),
-
         BfInfoField::Size => Value::Integer(usize_to_redis_integer(bloom.info_size())),
-
         BfInfoField::Filters => Value::Integer(usize_to_redis_integer(bloom.info_filter_count())),
-
         BfInfoField::Items => Value::Integer(u64_to_redis_integer(bloom.info_items())),
-
         BfInfoField::Expansion => {
             match bloom.info_expansion() {
                 Some(expansion) => Value::Integer(i64::from(expansion)),
-
-                /*
-                 * Redis current implementation:
-                 *
-                 * NONSCALING =>
-                 * Expansion rate = Null
-                 */
                 None => Value::Null,
             }
         }
@@ -227,12 +197,9 @@ impl Command for BfInfoCommand {
     ) -> Result<Value, CacheCatError> {
         if let Some(queue) = client.transaction_queue.as_mut() {
             queue.push(self.raft_request(items)?);
-
             return Ok(Value::SimpleString(String::from("QUEUED")));
         }
-
         let operation = self.read_operation(items)?;
-
         server.app.read(operation, client.db_number).await
     }
 }

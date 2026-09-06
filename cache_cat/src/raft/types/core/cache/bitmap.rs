@@ -1,5 +1,6 @@
 use crate::protocol::bf::bf_add::BfAddReq;
 use crate::protocol::bf::bf_insert::BfInsertReq;
+use crate::protocol::bf::bf_loadchunk::BfLoadChunkReq;
 use crate::protocol::bf::bf_madd::BfMAddReq;
 use crate::protocol::bf::bf_reserve::BfReserveReq;
 use crate::protocol::bitmap::bitfield::BitFieldReq;
@@ -28,6 +29,9 @@ impl MyCache {
         self.execute_compute(param, update)
     }
     pub fn bf_insert(&self, param: BfInsertReq, update: &mut Update) -> Value {
+        self.execute_compute(param, update)
+    }
+    pub fn bf_load(&self, param: BfLoadChunkReq, update: &mut Update) -> Value {
         self.execute_compute(param, update)
     }
 }

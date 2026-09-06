@@ -306,33 +306,13 @@ impl ComputeCommand for BfReserveReq {
         BaseOperation::BfReserve(self)
     }
 
-    /*
-     * mutate() means:
-     *
-     * key already exists.
-     *
-     * BF.RESERVE NEVER overwrites an existing key.
-     */
     fn mutate(
         self,
         entry: EntrySnapshot<MyValue>,
         _write_clock: u64,
     ) -> (MochaOperation<MyValue>, Value) {
         match &entry.value.data {
-            /*
-             * Existing Bloom filter:
-             *
-             * Redis:
-             * ERR item exists
-             */
             ValueObject::Bloom(_) => (MochaOperation::Abort, ProtocolError::BloomItemExists.into()),
-
-            /*
-             * Existing STRING / HASH / LIST / etc:
-             *
-             * Redis:
-             * WRONGTYPE ...
-             */
             _ => (MochaOperation::Abort, ProtocolError::WrongType.into()),
         }
     }
@@ -350,19 +330,13 @@ impl ComputeCommand for BfReserveReq {
             self.non_scaling,
         ) {
             Ok(bloom) => bloom,
-
             Err(error) => {
                 return (MochaOperation::Abort, bloom_create_error(error).into());
             }
         };
-
         (
             MochaOperation::Insert {
                 value: MyValue::new(ValueObject::Bloom(Arc::new(Mutex::new(bloom)))),
-
-                /*
-                 * BF.RESERVE creates a new persistent key.
-                 */
                 expire: ExpirePolicy::Persistent,
             },
             Value::SimpleString("OK".to_string()),
@@ -374,16 +348,12 @@ impl ComputeCommand for BfReserveReq {
 fn bloom_create_error(error: BloomError) -> ProtocolError {
     match error {
         BloomError::OutOfMemory => ProtocolError::BloomCreateOutOfMemory,
-
-        BloomError::Full | BloomError::Invalid | BloomError::Overflow => {
-            ProtocolError::BloomCreateFailed
-        }
+        _ => ProtocolError::BloomCreateFailed,
     }
 }
 
 #[inline]
 fn parse_f64(bytes: &[u8]) -> Option<f64> {
     let value = std::str::from_utf8(bytes).ok()?;
-
     value.parse::<f64>().ok()
 }

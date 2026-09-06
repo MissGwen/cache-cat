@@ -3,7 +3,7 @@
 //! This module provides a unified error type that hides internal complexity
 //! behind a simple, user-facing interface.
 
-use crate::error::ErrorKind::{Internal, InvalidConfig, Protocol, Retryable, Storage, Tls, RPC};
+use crate::error::ErrorKind::{Internal, InvalidConfig, Protocol, RPC, Retryable, Storage, Tls};
 use crate::raft::types::core::response_value::Value;
 use crate::raft::types::raft_types::TypeConfig;
 use mlua::prelude::LuaError;
@@ -306,6 +306,17 @@ pub enum ProtocolError {
 
     #[error("Second argument must be numeric")]
     BloomScanDumpIteratorNotNumeric,
+    #[error("ERR Second argument must be numeric")]
+    BloomLoadChunkIteratorNotNumeric,
+
+    #[error("ERR received bad data")]
+    BloomLoadChunkBadData,
+
+    #[error("ERR invalid offset - no link found")]
+    BloomLoadChunkInvalidOffset,
+
+    #[error("ERR invalid chunk - Too big for current filter")]
+    BloomLoadChunkTooBig,
 }
 
 /// TLS-related errors

@@ -46,15 +46,15 @@ const DUMP_LINK_SIZE: usize = 53;
 pub enum BloomError {
     /// NONSCALING filter 满了。
     Full,
-
     /// 内存分配失败。
     OutOfMemory,
-
     /// 参数或者内部状态非法。
     Invalid,
-
     /// 容量计算发生溢出。
     Overflow,
+    BadDumpData,
+    InvalidDumpOffset,
+    DumpChunkTooBig,
 }
 
 /// 一个 Redis scalable Bloom Filter。
@@ -185,13 +185,11 @@ impl BloomObject {
         if iterator == 0 {
             return (1, self.encode_dump_header());
         }
-
         self.scan_dump_chunk(iterator)
     }
 
     fn encode_dump_header(&self) -> Bytes {
         let mut buf = Vec::with_capacity(DUMP_HEADER_SIZE + self.filters.len() * DUMP_LINK_SIZE);
-
         let options = BLOOM_OPT_NOROUND
             | BLOOM_OPT_FORCE64
             | if self.non_scaling {
@@ -199,15 +197,12 @@ impl BloomObject {
             } else {
                 0
             };
-
         buf.extend_from_slice(&self.size.to_ne_bytes());
         buf.extend_from_slice(&(self.filters.len() as u32).to_ne_bytes());
         buf.extend_from_slice(&options.to_ne_bytes());
         buf.extend_from_slice(&self.growth.to_ne_bytes());
-
         for filter in &self.filters {
             let bytes = filter.bitmap.len() as u64;
-
             buf.extend_from_slice(&bytes.to_ne_bytes());
             buf.extend_from_slice(&filter.bits.to_ne_bytes());
             buf.extend_from_slice(&filter.size.to_ne_bytes());
@@ -219,6 +214,147 @@ impl BloomObject {
         }
 
         Bytes::from(buf)
+    }
+    pub fn from_dump_header(data: &[u8]) -> Result<Self, BloomError> {
+        if data.len() < DUMP_HEADER_SIZE {
+            return Err(BloomError::BadDumpData);
+        }
+        let mut offset = 0;
+        let size = read_u64_ne(data, &mut offset)?;
+        let nfilters = read_u32_ne(data, &mut offset)? as usize;
+        let options = read_u32_ne(data, &mut offset)?;
+        let growth = read_u32_ne(data, &mut offset)?;
+
+        if nfilters == 0 {
+            return Err(BloomError::BadDumpData);
+        }
+        let expected_len = DUMP_LINK_SIZE
+            .checked_mul(nfilters)
+            .and_then(|len| DUMP_HEADER_SIZE.checked_add(len))
+            .ok_or(BloomError::BadDumpData)?;
+
+        if data.len() != expected_len {
+            return Err(BloomError::BadDumpData);
+        }
+        let required_options = BLOOM_OPT_NOROUND | BLOOM_OPT_FORCE64;
+        let allowed_options = required_options | BLOOM_OPT_NO_SCALING;
+        if options & required_options != required_options || options & !allowed_options != 0 {
+            return Err(BloomError::BadDumpData);
+        }
+        let mut filters = Vec::new();
+        filters
+            .try_reserve_exact(nfilters)
+            .map_err(|_| BloomError::BadDumpData)?;
+        let mut total_size = 0u64;
+        for _ in 0..nfilters {
+            let bytes = read_u64_ne(data, &mut offset)?;
+            let bits = read_u64_ne(data, &mut offset)?;
+            let filter_size = read_u64_ne(data, &mut offset)?;
+            let error = read_f64_ne(data, &mut offset)?;
+            let bpe = read_f64_ne(data, &mut offset)?;
+            let hashes = read_u32_ne(data, &mut offset)?;
+            let entries = read_u64_ne(data, &mut offset)?;
+            let n2 = read_u8(data, &mut offset)?;
+            if bytes == 0 || bits == 0 {
+                return Err(BloomError::BadDumpData);
+            }
+            let expected_bits = bytes.checked_mul(8).ok_or(BloomError::BadDumpData)?;
+            if bits != expected_bits {
+                return Err(BloomError::BadDumpData);
+            }
+            if n2 != 0 {
+                return Err(BloomError::BadDumpData);
+            }
+            if !error.is_finite() || error <= 0.0 || error >= 1.0 {
+                return Err(BloomError::BadDumpData);
+            }
+            if !bpe.is_finite() || bpe <= 0.0 {
+                return Err(BloomError::BadDumpData);
+            }
+            let expected_hashes = (LN2 * bpe).ceil();
+            if !expected_hashes.is_finite()
+                || expected_hashes < 1.0
+                || expected_hashes > u32::MAX as f64
+                || hashes != expected_hashes as u32
+            {
+                return Err(BloomError::BadDumpData);
+            }
+            let bytes = usize::try_from(bytes).map_err(|_| BloomError::BadDumpData)?;
+            let mut bitmap = Vec::new();
+            bitmap
+                .try_reserve_exact(bytes)
+                .map_err(|_| BloomError::BadDumpData)?;
+            bitmap.resize(bytes, 0);
+            total_size = total_size
+                .checked_add(filter_size)
+                .ok_or(BloomError::BadDumpData)?;
+            filters.push(BloomSubFilter {
+                bitmap,
+                entries,
+                size: filter_size,
+                error,
+                bpe,
+                hashes,
+                bits,
+            });
+        }
+        if total_size != size {
+            return Err(BloomError::BadDumpData);
+        }
+        Ok(Self {
+            filters,
+            size,
+            growth,
+            non_scaling: options & BLOOM_OPT_NO_SCALING != 0,
+        })
+    }
+
+    pub fn load_dump_chunk(&mut self, iterator: i64, data: &[u8]) -> Result<(), BloomError> {
+        let data_len = i64::try_from(data.len()).map_err(|_| BloomError::BadDumpData)?;
+        if iterator <= 0 || iterator < data_len {
+            return Err(BloomError::BadDumpData);
+        }
+        let start_iterator = iterator - data_len;
+        let (filter_index, offset) = self
+            .dump_link_position(start_iterator)
+            .ok_or(BloomError::InvalidDumpOffset)?;
+        let filter = &mut self.filters[filter_index];
+        let remaining = filter
+            .bitmap
+            .len()
+            .checked_sub(offset)
+            .ok_or(BloomError::InvalidDumpOffset)?;
+
+        if data.len() > remaining {
+            return Err(BloomError::DumpChunkTooBig);
+        }
+
+        let end = offset + data.len();
+
+        filter.bitmap[offset..end].copy_from_slice(data);
+
+        Ok(())
+    }
+
+    fn dump_link_position(&self, iterator: i64) -> Option<(usize, usize)> {
+        if iterator < 1 {
+            return None;
+        }
+
+        let position = usize::try_from(iterator - 1).ok()?;
+        let mut seek = 0usize;
+
+        for (index, filter) in self.filters.iter().enumerate() {
+            let end = seek.checked_add(filter.bitmap.len())?;
+
+            if end > position {
+                return Some((index, position - seek));
+            }
+
+            seek = end;
+        }
+
+        None
     }
 
     fn scan_dump_chunk(&self, iterator: i64) -> (i64, Bytes) {
@@ -744,6 +880,40 @@ fn murmur_hash64a(data: &[u8], seed: u64) -> u64 {
     hash ^= hash >> R;
 
     hash
+}
+
+fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, BloomError> {
+    let value = *data.get(*offset).ok_or(BloomError::BadDumpData)?;
+    *offset += 1;
+    Ok(value)
+}
+
+fn read_u32_ne(data: &[u8], offset: &mut usize) -> Result<u32, BloomError> {
+    let bytes = read_array::<4>(data, offset)?;
+    Ok(u32::from_ne_bytes(bytes))
+}
+
+fn read_u64_ne(data: &[u8], offset: &mut usize) -> Result<u64, BloomError> {
+    let bytes = read_array::<8>(data, offset)?;
+    Ok(u64::from_ne_bytes(bytes))
+}
+
+fn read_f64_ne(data: &[u8], offset: &mut usize) -> Result<f64, BloomError> {
+    let bytes = read_array::<8>(data, offset)?;
+    Ok(f64::from_ne_bytes(bytes))
+}
+
+fn read_array<const N: usize>(data: &[u8], offset: &mut usize) -> Result<[u8; N], BloomError> {
+    let end = offset.checked_add(N).ok_or(BloomError::BadDumpData)?;
+
+    let slice = data.get(*offset..end).ok_or(BloomError::BadDumpData)?;
+
+    let mut result = [0u8; N];
+    result.copy_from_slice(slice);
+
+    *offset = end;
+
+    Ok(result)
 }
 
 #[cfg(test)]

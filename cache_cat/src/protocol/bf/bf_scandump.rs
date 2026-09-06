@@ -35,15 +35,12 @@ impl BfScanDumpParams {
         if items.len() != 3 {
             return Err(ProtocolError::WrongArgCount("BF.SCANDUMP"));
         }
-
         let key = items[1]
             .string_bytes_clone()
             .ok_or(ProtocolError::InvalidArgument("key"))?;
-
         let iterator = items[2]
             .parse_i64()
             .ok_or(ProtocolError::BloomScanDumpIteratorNotNumeric)?;
-
         Ok(Self { key, iterator })
     }
 }
@@ -99,7 +96,6 @@ impl Command for BfScanDumpCommand {
             queue.push(self.raft_request(items)?);
             return Ok(Value::SimpleString("QUEUED".to_string()));
         }
-
         let operation = self.read_operation(items)?;
         server.app.read(operation, client.db_number).await
     }

@@ -16,50 +16,53 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
-
-/// BF.MADD key item [item ...]
 #[derive(Debug, Clone, PartialEq)]
-pub struct BfMAddParams {
+pub struct BfLoadChunkParams {
     pub key: Bytes,
-    pub items: Vec<Bytes>,
+    pub iterator: i64,
+    pub data: Bytes,
 }
-
-impl BfMAddParams {
-    fn parse(values: &[Value]) -> Result<Self, ProtocolError> {
-        if values.len() < 3 {
-            return Err(ProtocolError::WrongArgCount("BF.MADD"));
+impl BfLoadChunkParams {
+    fn parse(items: &[Value]) -> Result<Self, ProtocolError> {
+        if items.len() != 4 {
+            return Err(ProtocolError::WrongArgCount("BF.LOADCHUNK"));
         }
-        let key = values[1]
+        let key = items[1]
             .string_bytes_clone()
             .ok_or(ProtocolError::InvalidArgument("key"))?;
-        let mut items = Vec::with_capacity(values.len() - 2);
-        for value in &values[2..] {
-            let item = value
-                .string_bytes_clone()
-                .ok_or(ProtocolError::InvalidArgument("item"))?;
+        let iterator = items[2]
+            .parse_i64()
+            .ok_or(ProtocolError::BloomLoadChunkIteratorNotNumeric)?;
+        let data = items[3]
+            .string_bytes_clone()
+            .ok_or(ProtocolError::InvalidArgument("data"))?;
 
-            items.push(item);
-        }
-        Ok(Self { key, items })
+        Ok(Self {
+            key,
+            iterator,
+            data,
+        })
     }
 }
 
-/// BF.MADD command executor.
-pub struct BfMAddCommand;
+pub struct BfLoadChunkCommand;
 
-impl RaftCommand for BfMAddCommand {
+impl RaftCommand for BfLoadChunkCommand {
     fn raft_request(&self, items: &[Value]) -> Result<Operation, ProtocolError> {
-        let params = BfMAddParams::parse(items)?;
+        let params = BfLoadChunkParams::parse(items)?;
 
-        Ok(Operation::Base(BaseOperation::BfMAdd(BfMAddReq {
-            key: params.key,
-            items: params.items,
-        })))
+        Ok(Operation::Base(BaseOperation::BfLoadChunk(
+            BfLoadChunkReq {
+                key: params.key,
+                iterator: params.iterator,
+                data: params.data,
+            },
+        )))
     }
 }
 
 #[async_trait]
-impl Command for BfMAddCommand {
+impl Command for BfLoadChunkCommand {
     async fn execute(
         &self,
         client: &mut Client,
@@ -68,7 +71,6 @@ impl Command for BfMAddCommand {
     ) -> Result<Value, CacheCatError> {
         if let Some(queue) = client.transaction_queue.as_mut() {
             queue.push(self.raft_request(items)?);
-
             return Ok(Value::SimpleString("QUEUED".to_string()));
         }
         let operation = self.raft_request(items)?;
@@ -77,111 +79,86 @@ impl Command for BfMAddCommand {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct BfMAddReq {
+pub struct BfLoadChunkReq {
     pub key: Bytes,
-
-    pub items: Vec<Bytes>,
+    pub iterator: i64,
+    pub data: Bytes,
 }
 
-impl fmt::Display for BfMAddReq {
+impl fmt::Display for BfLoadChunkReq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "BfMAddReq {{ key: {}, items: {} }}",
+            "BfLoadChunkReq {{ key: {}, iterator: {}, data_len: {} }}",
             String::from_utf8_lossy(&self.key),
-            self.items.len(),
+            self.iterator,
+            self.data.len()
         )
     }
 }
 
-impl ComputeCommand for BfMAddReq {
+impl ComputeCommand for BfLoadChunkReq {
     fn key(&self) -> &Bytes {
         &self.key
     }
     fn into_base_op(self) -> BaseOperation {
-        BaseOperation::BfMAdd(self)
+        BaseOperation::BfLoadChunk(self)
     }
     fn mutate(
         self,
         entry: EntrySnapshot<MyValue>,
         _write_clock: u64,
     ) -> (MochaOperation<MyValue>, Value) {
-
         let expire = entry.get_expire_policy();
-        let (replies, mutated) = {
+        let result = {
             let bloom = match &entry.value.data {
                 ValueObject::Bloom(bloom) => bloom,
-                /*
-                 * WRONGTYPE 是 command-level error，
-                 * 不是数组中的某一个元素。
-                 */
                 _ => {
                     return (MochaOperation::Abort, ProtocolError::WrongType.into());
                 }
             };
             let mut bloom = bloom.lock();
-            add_items(&mut bloom, &self.items)
+            bloom.load_dump_chunk(self.iterator, &self.data)
         };
-        let reply = Value::Array(Some(replies));
-        if mutated {
-            (
+        match result {
+            Ok(()) => (
                 MochaOperation::Insert {
                     value: entry.value,
                     expire,
                 },
-                reply,
-            )
-        } else {
-            (MochaOperation::Abort, reply)
+                Value::ok(),
+            ),
+            Err(error) => (MochaOperation::Abort, bloom_load_error(error).into()),
         }
     }
 
     fn init(self) -> (MochaOperation<MyValue>, Value) {
-        let mut bloom = match BloomObject::redis_default() {
+        if self.iterator != 1 {
+            return (MochaOperation::Abort, ProtocolError::BloomNotFound.into());
+        }
+        let bloom = match BloomObject::from_dump_header(&self.data) {
             Ok(bloom) => bloom,
             Err(error) => {
-                return (MochaOperation::Abort, bloom_create_error(error).into());
+                return (MochaOperation::Abort, bloom_load_error(error).into());
             }
         };
-        let (replies, _mutated) = add_items(&mut bloom, &self.items);
         (
             MochaOperation::Insert {
                 value: MyValue::new(ValueObject::Bloom(Arc::new(Mutex::new(bloom)))),
                 expire: ExpirePolicy::Persistent,
             },
-            Value::Array(Some(replies)),
+            Value::ok(),
         )
     }
 }
 
-fn add_items(bloom: &mut BloomObject, items: &[Bytes]) -> (Vec<Value>, bool) {
-    let mut replies = Vec::with_capacity(items.len());
-    let mut mutated = false;
-    for item in items {
-        match bloom.add(item) {
-            Ok(true) => {
-                mutated = true;
-                replies.push(Value::Boolean(true));
-            }
-            Ok(false) => {
-                replies.push(Value::Boolean(false));
-            }
-            Err(BloomError::Full) => {
-                replies.push(ProtocolError::BloomFilterFull.into());
-                break;
-            }
-            Err(_) => {
-                replies.push(ProtocolError::BloomInsertFailed.into());
-            }
-        }
-    }
-    (replies, mutated)
-}
-
-#[inline]
-fn bloom_create_error(error: BloomError) -> ProtocolError {
+fn bloom_load_error(error: BloomError) -> ProtocolError {
     match error {
+        BloomError::BadDumpData => ProtocolError::BloomLoadChunkBadData,
+        BloomError::InvalidDumpOffset => ProtocolError::BloomLoadChunkInvalidOffset,
+        BloomError::DumpChunkTooBig => ProtocolError::BloomLoadChunkTooBig,
         BloomError::OutOfMemory => ProtocolError::BloomCreateOutOfMemory,
-        _ => ProtocolError::BloomCreateFailed,
+        BloomError::Overflow | BloomError::Invalid => ProtocolError::BloomLoadChunkBadData,
+        BloomError::Full => ProtocolError::BloomLoadChunkBadData,
     }
 }
